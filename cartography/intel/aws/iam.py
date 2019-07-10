@@ -91,6 +91,19 @@ def get_policy_list_data(session):
             logger.warn("Cannot get policy list. (%s)", e)
         else:
             raise
+    try:
+        for i,policy in enumerate(policies):
+            policies[i]['action_allow'] = policies[i]['action_deny'] = []
+        for i,policy in enumerate(policies):
+            document = client.get_policy_version(PolicyArn=policy['Arn'],VersionId=policy['DefaultVersionId'])
+            for st in document['PolicyVersion']['Document']['Statement']:
+                parsed_statement = policyuniverse.statement.Statement(st)
+                policies[i]["action_%s"%parsed_statement.effect.lower()] = list(parsed_statement.actions_expanded)
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get policy list. (%s)", e)
+        else:
+            raise
     return {'Policies': policies}
 
 
@@ -210,6 +223,8 @@ def load_policies(session, policies, current_aws_account_id, aws_update_tag):
     SET pnode.name = {POLICY_NAME}, pnode.path = {PATH}, pnode.defaultversionid = {DEFAULT_VERSION_ID},
     pnode.updatedate = {POLICY_UPDATE}, pnode.isattachable = {IS_ATTACHABLE},
     pnode.attachmentcount = {ATTACHMENT_COUNT},
+    pnode.action_allow = {ACTIONS_ALLOW},
+    pnode.action_deny = {ACTIONS_DENY},
     pnode.lastupdated = {aws_update_tag}
     WITH pnode
     MATCH (aa:AWSAccount{id: {AWS_ACCOUNT_ID}})
@@ -230,6 +245,8 @@ def load_policies(session, policies, current_aws_account_id, aws_update_tag):
             POLICY_UPDATE=str(policy["UpdateDate"]),
             IS_ATTACHABLE=policy["IsAttachable"],
             ATTACHMENT_COUNT=policy["AttachmentCount"],
+            ACTIONS_ALLOW=policy['action_allow'],
+            ACTIONS_DENY=policy['action_deny'],
             AWS_ACCOUNT_ID=current_aws_account_id,
             aws_update_tag=aws_update_tag
         )
