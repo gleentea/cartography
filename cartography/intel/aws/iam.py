@@ -1,4 +1,5 @@
 import logging
+import botocore.exceptions
 import policyuniverse.statement
 
 from cartography.util import run_cleanup_job
@@ -10,27 +11,56 @@ def get_group_policies(session, group_name):
     client = session.client('iam')
     paginator = client.get_paginator('list_group_policies')
     policy_names = []
-    for page in paginator.paginate(GroupName=group_name):
-        policy_names.extend(page['PolicyNames'])
+    try:
+        for page in paginator.paginate(GroupName=group_name):
+            policy_names.extend(page['PolicyNames'])
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get '%s' group policies. (%s)", group_name, e)
+        else:
+            raise
+
     return {'PolicyNames': policy_names}
 
 
 def get_group_policy_info(session, group_name, policy_name):
     client = session.client('iam')
-    return client.get_group_policy(GroupName=group_name, PolicyName=policy_name)
+    try:
+        return client.get_group_policy(GroupName=group_name, PolicyName=policy_name)
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get '%s' policy info of '%s'. (%s)", policy_name, group_name, e)
+        else:
+            raise
+
+    return {}
 
 
 def get_group_membership_data(session, group_name):
     client = session.client('iam')
-    return client.get_group(GroupName=group_name)
+    try:
+        return client.get_group(GroupName=group_name)
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get group membership of '%s'. (%s)", group_name, e)
+        else:
+            raise
+
+    return {}
 
 
 def get_user_list_data(session):
     client = session.client('iam')
     paginator = client.get_paginator('list_users')
     users = []
-    for page in paginator.paginate():
-        users.extend(page['Users'])
+    try:
+        for page in paginator.paginate():
+            users.extend(page['Users'])
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get user list. (%s)", e)
+        else:
+            raise
     return {'Users': users}
 
 
@@ -38,8 +68,14 @@ def get_group_list_data(session):
     client = session.client('iam')
     paginator = client.get_paginator('list_groups')
     groups = []
-    for page in paginator.paginate():
-        groups.extend(page['Groups'])
+    try:
+        for page in paginator.paginate():
+            groups.extend(page['Groups'])
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get group list. (%s)", e)
+        else:
+            raise
     return {'Groups': groups}
 
 
@@ -47,8 +83,14 @@ def get_policy_list_data(session):
     client = session.client('iam')
     paginator = client.get_paginator('list_policies')
     policies = []
-    for page in paginator.paginate():
-        policies.extend(page['Policies'])
+    try:
+        for page in paginator.paginate():
+            policies.extend(page['Policies'])
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get policy list. (%s)", e)
+        else:
+            raise
     return {'Policies': policies}
 
 
@@ -56,8 +98,14 @@ def get_role_list_data(session):
     client = session.client('iam')
     paginator = client.get_paginator('list_roles')
     roles = []
-    for page in paginator.paginate():
-        roles.extend(page['Roles'])
+    try:
+        for page in paginator.paginate():
+            roles.extend(page['Roles'])
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get role list. (%s)", e)
+        else:
+            raise
     return {'Roles': roles}
 
 
@@ -65,20 +113,41 @@ def get_role_policies(session, role_name):
     client = session.client('iam')
     paginator = client.get_paginator('list_role_policies')
     policy_names = []
-    for page in paginator.paginate(RoleName=role_name):
-        policy_names.extend(page['PolicyNames'])
+    try:
+        for page in paginator.paginate(RoleName=role_name):
+            policy_names.extend(page['PolicyNames'])
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get '%s' role policies. (%s)", role_name, e)
+        else:
+            raise
+
     return {'PolicyNames': policy_names}
 
 
 def get_role_policy_info(session, role_name, policy_name):
     client = session.client('iam')
-    return client.get_role_policy(RoleName=role_name, PolicyName=policy_name)
+    try:
+        return client.get_role_policy(RoleName=role_name, PolicyName=policy_name)
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get '%s' role policy info. (%s)", policy_name, e)
+        else:
+            raise
+    return {}
 
 
 def get_account_access_key_data(session, username):
     client = session.client('iam')
     # NOTE we can get away without using a paginator here because users are limited to two access keys
-    return client.list_access_keys(UserName=username)
+    try:
+        return client.list_access_keys(UserName=username)
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get '%s' account access key. (%s)", username, e)
+        else:
+            raise
+    return {}
 
 
 def load_users(session, users, current_aws_account_id, aws_update_tag):
