@@ -169,7 +169,7 @@ def load_ec2_instances(session, data, region, current_aws_account_id, aws_update
                 State=instance_state,
                 AWS_ACCOUNT_ID=current_aws_account_id,
                 Region=region,
-                IamInstanceProfile=instance["IamInstanceProfile"]["Arn"],
+                IamInstanceProfile=instance.get("IamInstanceProfile",{}).get("Arn",""),
                 aws_update_tag=aws_update_tag
             )
 

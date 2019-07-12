@@ -1,0 +1,9 @@
+{
+  "statements": [
+  {
+    "query": "MATCH (instance:EC2Instance) WITH instance MATCH (profile:AWSInstanceProfile) WHERE profile.arn = instance.iaminstanceprofile WITH instance,profile MERGE (profile) -[r:AWS_ATTACHED_INSTANCE_PROFILE]->(instance) ON CREATE SET r.firstseen=timestamp() SET r.lastupdated={UPDATE_TAG}",
+    "iterative": false
+  }
+  ],
+  "name": "AWS EC2 attached role"
+}
