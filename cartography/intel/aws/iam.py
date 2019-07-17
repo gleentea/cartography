@@ -895,7 +895,6 @@ def sync(neo4j_session, boto3_session, account_id, update_tag, common_job_parame
     sync_policies(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
     sync_roles(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
     sync_group_memberships(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
-    sync_group_policies(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
     sync_user_policies(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
     sync_group_policies(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
     sync_role_policies(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
