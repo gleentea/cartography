@@ -20,7 +20,18 @@ def get_group_policies(session, group_name):
         else:
             raise
 
-    return {'PolicyNames': policy_names}
+    paginator = client.get_paginator('list_attached_group_policies')
+    attached_policies = []
+    try:
+        for page in paginator.paginate(GroupName=group_name):
+            attached_policies.extend(page['AttachedPolicies'])
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get '%s' attached group policies. (%s)", group_name, e)
+        else:
+            raise
+
+    return {'PolicyNames': policy_names, 'AttachedPolicies': attached_policies}
 
 
 def get_group_policy_info(session, group_name, policy_name):
@@ -64,6 +75,45 @@ def get_user_list_data(session):
     return {'Users': users}
 
 
+def get_user_policies(session, user_name):
+    client = session.client('iam')
+    paginator = client.get_paginator('list_user_policies')
+    policy_names = []
+    try:
+        for page in paginator.paginate(UserName=user_name):
+            policy_names.extend(page['PolicyNames'])
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get '%s' user policies. (%s)", user_name, e)
+        else:
+            raise
+
+    paginator = client.get_paginator('list_attached_user_policies')
+    attached_policies = []
+    try:
+        for page in paginator.paginate(UserName=user_name):
+            attached_policies.extend(page['AttachedPolicies'])
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get '%s' attached user policies. (%s)", user_name, e)
+        else:
+            raise
+
+    return {'PolicyNames': policy_names, 'AttachedPolicies': attached_policies}
+
+
+def get_user_policy_info(session, user_name, policy_name):
+    client = session.client('iam')
+    try:
+        return client.get_user_policy(UserName=user_name, PolicyName=policy_name)
+    except botocore.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'AccessDenied':
+            logger.warn("Cannot get '%s' user policy info. (%s)", policy_name, e)
+        else:
+            raise
+    return {}
+
+
 def get_group_list_data(session):
     client = session.client('iam')
     paginator = client.get_paginator('list_groups')
@@ -84,8 +134,11 @@ def get_policy_list_data(session, saved_policy):
     paginator = client.get_paginator('list_policies')
     policies = []
     try:
-        for page in paginator.paginate():
-            policies.extend(page['Policies'])
+        for page in paginator.paginate(OnlyAttached=True):
+            for policy in page['Policies']:
+                if policy['AttachmentCount'] < 1:
+                    continue
+                policies.append(policy)
     except botocore.exceptions.ClientError as e:
         if e.response['Error']['Code'] == 'AccessDenied':
             logger.warn("Cannot get policy list. (%s)", e)
@@ -95,22 +148,15 @@ def get_policy_list_data(session, saved_policy):
     for i,policy in enumerate(policies):
         try:
             if saved_policy.get(policy['Arn'],{}).get('defaultversionid',"") == policy['DefaultVersionId']:
-                logger.debug("A policy named '%s' is not changed, skip", policy['Arn'])
                 policy = saved_policy[policy['Arn']]
-                key=['Arn','PolicyId','PolicyName','Path','DefaultVersionId','CreateDate','UpdateDate','IsAttachable','AttachemtnCount']
+                logger.debug("A policy named '%s' is not changed, skip", policy['arn'])
+                key=['Arn','PolicyId','Path','DefaultVersionId','CreateDate','UpdateDate','IsAttachable','AttachemtnCount']
                 for k in key:
                     policies[i][k] = policy[k.lower()]
+                policies[i]['PolicyName'] = policy['name']
             else:
                 document = client.get_policy_version(PolicyArn=policy['Arn'],VersionId=policy['DefaultVersionId'])
-                statement = document['PolicyVersion']['Document']['Statement']
-                if type(statement) != type(list()):
-                    statement = [statement]
-                policies[i]['action_allow'] = []
-                policies[i]['action_deny'] = []
-                for st in statement:
-                    parsed_statement = policyuniverse.statement.Statement(st)
-                    key = "action_{}".format(parsed_statement.effect.lower())
-                    policies[i][key].extend(list(parsed_statement.actions_expanded))
+                policies[i]['Statement'] = document['PolicyVersion']['Document']['Statement']
         except botocore.exceptions.ClientError as e:
             if e.response['Error']['Code'] == 'AccessDenied':
                 logger.warn("Cannot get policy list. (%s)", e)
@@ -226,7 +272,7 @@ def load_users(session, users, current_aws_account_id, aws_update_tag):
             PASSWORD_LASTUSED=str(user.get("PasswordLastUsed", "")),
             AWS_ACCOUNT_ID=current_aws_account_id,
             aws_update_tag=aws_update_tag
-        )
+        ).detach()
 
 
 def load_groups(session, groups, current_aws_account_id, aws_update_tag):
@@ -251,7 +297,35 @@ def load_groups(session, groups, current_aws_account_id, aws_update_tag):
             PATH=group["Path"],
             AWS_ACCOUNT_ID=current_aws_account_id,
             aws_update_tag=aws_update_tag
-        )
+        ).detach()
+
+
+def _load_policy_actions(session, policy_arn, statement, aws_update_tag):
+    ingest_policy_action= """
+    MATCH (pnode:AWSPolicy{arn: {ARN}})
+    SET pnode.lastupdated = {aws_update_tag}
+    WITH pnode
+    MERGE (action:AWSIAMAction{name: {IAMAction}})
+    ON CREATE SET action.firstseen=timestamp()
+    SET action.lastupdated={aws_update_tag}
+    WITH pnode,action
+    MERGE (action)<-[r:AWS_IAM_ACTION_%s]-(pnode)
+    ON CREATE SET r.firstseen = timestamp()
+    SET r.lastupdated = {aws_update_tag}
+    """
+
+    if type(statement) != type(list()):
+        statement = [statement]
+    for st in statement:
+        parsed_statement = policyuniverse.statement.Statement(st)
+        query = ingest_policy_action % parsed_statement.effect.upper()
+        for action in parsed_statement.actions_expanded:
+            session.run(
+                query,
+                ARN=policy_arn,
+                IAMAction=action,
+                aws_update_tag=aws_update_tag
+            ).detach()
 
 
 def load_policies(session, policies, current_aws_account_id, aws_update_tag):
@@ -269,19 +343,6 @@ def load_policies(session, policies, current_aws_account_id, aws_update_tag):
     SET r.lastupdated = {aws_update_tag}
     """
 
-    ingest_policy_action= """
-    MATCH (pnode:AWSPolicy{arn: {ARN}})
-    SET pnode.lastupdated = {aws_update_tag}
-    WITH pnode
-    MERGE (action:AWSIAMAction{name: {IAMAction}})
-    ON CREATE SET action.firstseen=timestamp()
-    SET action.lastupdated={aws_update_tag}
-    WITH pnode,action
-    MERGE (action)<-[r:AWS_IAM_%s]-(pnode)
-    ON CREATE SET r.firstseen = timestamp()
-    SET r.lastupdated = {aws_update_tag}
-
-    """
     for policy in policies:
         session.run(
             ingest_policy,
@@ -296,17 +357,9 @@ def load_policies(session, policies, current_aws_account_id, aws_update_tag):
             ATTACHMENT_COUNT=policy["AttachmentCount"],
             AWS_ACCOUNT_ID=current_aws_account_id,
             aws_update_tag=aws_update_tag
-        )
+        ).detach()
         logger.debug("syncing %s actions...", policy["PolicyName"])
-        for key in ["action_allow","action_deny"]:
-            for action in policy.get(key,[]):
-                session.run(
-                    ingest_policy_action % key.upper(),
-                    ARN=policy["Arn"],
-                    IAMAction=action,
-                    aws_update_tag=aws_update_tag
-                )
-
+        _load_policy_actions(session, policy["Arn"], policy.get("Statement",[]), aws_update_tag)
 
 
 def load_roles(session, roles, current_aws_account_id, aws_update_tag):
@@ -346,7 +399,7 @@ def load_roles(session, roles, current_aws_account_id, aws_update_tag):
             Path=role["Path"],
             AWS_ACCOUNT_ID=current_aws_account_id,
             aws_update_tag=aws_update_tag
-        )
+        ).detach()
 
         for statement in role["AssumeRolePolicyDocument"]["Statement"]:
             principal = statement["Principal"]
@@ -364,7 +417,7 @@ def load_roles(session, roles, current_aws_account_id, aws_update_tag):
                     SpnType=principal_type,
                     RoleArn=role['Arn'],
                     aws_update_tag=aws_update_tag
-                )
+                ).detach()
 
 
 def load_group_memberships(session, group_memberships, aws_update_tag):
@@ -385,7 +438,7 @@ def load_group_memberships(session, group_memberships, aws_update_tag):
                 GroupName=group_name,
                 PrincipalArn=principal_arn,
                 aws_update_tag=aws_update_tag
-            )
+            ).detach()
 
 
 def _find_roles_assumable_in_policy(policy_data):
@@ -398,6 +451,94 @@ def _find_roles_assumable_in_policy(policy_data):
         if parsed_statement.effect == 'Allow' and 'sts:assumerole' in parsed_statement.actions_expanded:
             ret.extend(list(parsed_statement.resources))
     return ret
+
+
+def _load_inline_policy(session, entity_arn, policy_data, aws_update_tag):
+    ingest_inline_policy = """
+    MERGE (policy:AWSPolicy{arn: {ARN}})
+    ON CREATE SET policy.firstseen = timestamp()
+    SET policy.name = {PolicyName}
+    SET policy.lastupdated = {aws_update_tag}
+    """
+    session.run(
+        ingest_inline_policy,
+        ARN=entity_arn,
+        PolicyName=policy_data['PolicyName'],
+        aws_update_tag=aws_update_tag
+    ).detach()
+    statement = [statement for statement in policy_data.get("PolicyDocument",{}).get("Statement",[])]
+    _load_policy_actions(session, entity_arn, statement, aws_update_tag)
+
+
+def load_user_policies(session, users_policies, aws_update_tag):
+    ingest_policies_assume_role = """
+    MATCH (user:AWSUser{name: {UserName}})
+    WITH user
+    MERGE (role:AWSRole{arn: {RoleArn}})
+    ON CREATE SET role.firstseen = timestamp()
+    SET role.lastupdated = {aws_update_tag}
+    WITH role, user
+    MERGE (user)-[r:STS_ASSUMEROLE_ALLOW]->(role)
+    ON CREATE SET r.firstseen = timestamp()
+    SET r.lastupdated = {aws_update_tag}
+    """
+
+    for user_name, policies in users_policies.items():
+        for policy_name, policy_data in policies.items():
+            for role_arn in _find_roles_assumable_in_policy(policy_data):
+                # TODO resource ARNs may contain wildcards, e.g. arn:aws:iam::*:role/admin --
+                # TODO policyuniverse can't expand resource wildcards so further thought is needed here
+                session.run(
+                    ingest_policies_assume_role,
+                    UserName=user_name,
+                    RoleArn=role_arn,
+                    aws_update_tag=aws_update_tag
+                ).detach()
+
+
+def load_user_inline_policies(session, aws_account_id, user_policies, aws_update_tag):
+    ingest_user_inline_policy = """
+    MATCH (user:AWSUser{name:{UserName}})
+    WITH user
+    MATCH (policy:AWSPolicy{arn:{PolicyARN}})
+    WITH user,policy
+    MERGE (policy)-[r:AWS_INLINE_POLICY]->(user)
+    ON CREATE SET r.firstseen = timestamp()
+    SET r.lastupdated = {aws_update_tag}
+    """
+    for user_name, policies in user_policies.items():
+        for policy_name, policy_data in policies.items():
+            arn = "{}:inlinepolicy:{}:{}".format(aws_account_id, user_name, policy_name)
+            _load_inline_policy(session, arn, policy_data, aws_update_tag)
+            session.run(
+                ingest_user_inline_policy,
+                UserName=user_name,
+                PolicyARN=arn,
+                aws_update_tag=aws_update_tag
+            ).detach()
+
+
+def load_attached_user_policies(session, attached_user_policies, aws_update_tag):
+    ingest_attached_user_policies = """
+    MATCH (policy:AWSPolicy{arn: {PolicyArn}})
+    WITH policy
+    MERGE (user:AWSUser{name: {UserName}})
+    ON CREATE SET user.firstseen = timestamp()
+    SET user.lastupdated = {aws_update_tag}
+    WITH user, policy
+    MERGE (policy)-[r:AWS_ATTACHED_POLICY]->(user)
+    ON CREATE SET r.firstseen = timestamp()
+    SET r.lastupdated = {aws_update_tag}
+    """
+
+    for user_name, policies in attached_user_policies.items():
+        for policy_arn in policies:
+            session.run(
+                ingest_attached_user_policies,
+                UserName=user_name,
+                PolicyArn=policy_arn,
+                aws_update_tag=aws_update_tag
+            ).detach()
 
 
 def load_group_policies(session, group_policies, aws_update_tag):
@@ -423,7 +564,52 @@ def load_group_policies(session, group_policies, aws_update_tag):
                     GroupName=group_name,
                     RoleArn=role_arn,
                     aws_update_tag=aws_update_tag
-                )
+                ).detach()
+
+
+def load_group_inline_policies(session, aws_account_id, group_policies, aws_update_tag):
+    ingest_group_inline_policy = """
+    MATCH (group:AWSGroup{name:{GroupName}})
+    WITH group
+    MATCH (policy:AWSPolicy{arn:{PolicyARN}})
+    WITH group,policy
+    MERGE (policy)-[r:AWS_INLINE_POLICY]->(group)
+    ON CREATE SET r.firstseen = timestamp()
+    SET r.lastupdated = {aws_update_tag}
+    """
+    for group_name, policies in group_policies.items():
+        for policy_name, policy_data in policies.items():
+            arn = "{}:inlinepolicy:{}:{}".format(aws_account_id, group_name, policy_name)
+            _load_inline_policy(session, arn, policy_data, aws_update_tag)
+            session.run(
+                ingest_group_inline_policy,
+                GroupName=group_name,
+                PolicyARN=arn,
+                aws_update_tag=aws_update_tag
+            ).detach()
+
+
+def load_attached_group_policies(session, attached_group_policies, aws_update_tag):
+    ingest_attached_group_policies = """
+    MATCH (policy:AWSPolicy{arn: {PolicyArn}})
+    WITH policy
+    MERGE (group:AWSGroup{name: {GroupName}})
+    ON CREATE SET group.firstseen = timestamp()
+    SET group.lastupdated = {aws_update_tag}
+    WITH group, policy
+    MERGE (policy)-[r:AWS_ATTACHED_POLICY]->(group)
+    ON CREATE SET r.firstseen = timestamp()
+    SET r.lastupdated = {aws_update_tag}
+    """
+
+    for group_name, policies in attached_group_policies.items():
+        for policy_arn in policies:
+            session.run(
+                ingest_attached_group_policies,
+                GroupName=group_name,
+                PolicyArn=policy_arn,
+                aws_update_tag=aws_update_tag
+            ).detach()
 
 
 def load_role_policies(session, role_policies, aws_update_tag):
@@ -449,7 +635,29 @@ def load_role_policies(session, role_policies, aws_update_tag):
                     RoleName=role_name,
                     RoleArn=role_arn,
                     aws_update_tag=aws_update_tag
-                )
+                ).detach()
+
+
+def load_role_inline_policies(session, aws_account_id, role_policies, aws_update_tag):
+    ingest_role_inline_policy = """
+    MATCH (role:AWSRole{name:{RoleName}})
+    WITH role
+    MATCH (policy:AWSPolicy{arn:{PolicyARN}})
+    WITH role,policy
+    MERGE (policy)-[r:AWS_INLINE_POLICY]->(role)
+    ON CREATE SET r.firstseen = timestamp()
+    SET r.lastupdated = {aws_update_tag}
+    """
+    for role_name, policies in role_policies.items():
+        for policy_name, policy_data in policies.items():
+            arn = "{}:inlinepolicy:{}:{}".format(aws_account_id, role_name, policy_name)
+            _load_inline_policy(session, arn, policy_data, aws_update_tag)
+            session.run(
+                ingest_role_inline_policy,
+                RoleName=role_name,
+                PolicyARN=arn,
+                aws_update_tag=aws_update_tag
+            ).detach()
 
 
 def load_attached_role_policies(session, attached_role_policies, aws_update_tag):
@@ -472,7 +680,7 @@ def load_attached_role_policies(session, attached_role_policies, aws_update_tag)
                 RoleName=role_name,
                 PolicyArn=policy_arn,
                 aws_update_tag=aws_update_tag
-            )
+            ).detach()
 
 
 def load_user_access_keys(session, user_access_keys, aws_update_tag):
@@ -499,7 +707,7 @@ def load_user_access_keys(session, user_access_keys, aws_update_tag):
                     CreateDate=str(key['CreateDate']),
                     Status=key['Status'],
                     aws_update_tag=aws_update_tag
-                )
+                ).detach()
 
 def load_instance_profiles(session, instance_profiles,aws_update_tag):
     ingest_instance_profile = """
@@ -517,7 +725,10 @@ def load_instance_profiles(session, instance_profiles,aws_update_tag):
     ON CREATE SET r.firstseen = timestamp()
     SET r.lastupdated = {aws_update_tag}
     """
+
     for profile in instance_profiles:
+        if len(profile['Roles']) < 1:
+            continue
         session.run(
             ingest_instance_profile,
             ROLE_ARN=profile['Roles'][0]['Arn'],
@@ -527,7 +738,8 @@ def load_instance_profiles(session, instance_profiles,aws_update_tag):
             ID=profile['InstanceProfileId'],
             CREATE_DATE=profile['CreateDate'],
             aws_update_tag=aws_update_tag
-        )
+        ).detach()
+
 
 def sync_users(neo4j_session, boto3_session, current_aws_account_id, aws_update_tag, common_job_parameters):
     logger.debug("Syncing IAM users for account '%s'.", current_aws_account_id)
@@ -562,6 +774,30 @@ def sync_roles(neo4j_session, boto3_session, current_aws_account_id, aws_update_
     run_cleanup_job('aws_import_roles_cleanup.json', neo4j_session, common_job_parameters)
 
 
+def sync_user_policies(neo4j_session, boto3_session, current_aws_account_id, aws_update_tag, common_job_parameters):
+    logger.debug("Syncing IAM user policies for account '%s'.", current_aws_account_id)
+    query = "MATCH (user:AWSUser)<-[:RESOURCE]-(AWSAccount{id: {AWS_ACCOUNT_ID}}) return user.name as name;"
+    result = neo4j_session.run(query, AWS_ACCOUNT_ID=current_aws_account_id)
+    users = [r['name'] for r in result]
+    users_policies = {}
+    attached_users_policies = {}
+    for user_name in users:
+        logger.debug("Syncing '%s' user policy...", user_name)
+        users_policies[user_name] = {}
+        user_policies = get_user_policies(boto3_session, user_name)
+        for policy_name in user_policies['PolicyNames']:
+            users_policies[user_name][policy_name] = get_user_policy_info(boto3_session, user_name, policy_name)
+        attached_users_policies[user_name] = list(set([p['PolicyArn'] for p in user_policies['AttachedPolicies']]))
+    load_user_policies(neo4j_session, users_policies, aws_update_tag)
+    load_user_inline_policies(neo4j_session, current_aws_account_id, users_policies, aws_update_tag)
+    load_attached_user_policies(neo4j_session, attached_users_policies, aws_update_tag)
+    run_cleanup_job(
+        'aws_import_users_policy_cleanup.json',
+        neo4j_session,
+        common_job_parameters
+    )
+
+
 def sync_group_memberships(neo4j_session, boto3_session, current_aws_account_id, aws_update_tag, common_job_parameters):
     logger.debug("Syncing IAM group membership for account '%s'.", current_aws_account_id)
     query = "MATCH (group:AWSGroup)<-[:RESOURCE]-(AWSAccount{id: {AWS_ACCOUNT_ID}}) return group.name as name;"
@@ -582,11 +818,17 @@ def sync_group_policies(neo4j_session, boto3_session, current_aws_account_id, aw
     result = neo4j_session.run(query, AWS_ACCOUNT_ID=current_aws_account_id)
     groups = [r['name'] for r in result]
     groups_policies = {}
+    attached_groups_policies = {}
     for group_name in groups:
+        logger.debug("Syncing '%s' group policy...", group_name)
         groups_policies[group_name] = {}
-        for policy_name in get_group_policies(boto3_session, group_name)['PolicyNames']:
+        group_policies = get_group_policies(boto3_session, group_name)
+        for policy_name in group_policies['PolicyNames']:
             groups_policies[group_name][policy_name] = get_group_policy_info(boto3_session, group_name, policy_name)
+        attached_groups_policies[group_name] = list(set([p['PolicyArn'] for p in group_policies['AttachedPolicies']]))
     load_group_policies(neo4j_session, groups_policies, aws_update_tag)
+    load_group_inline_policies(neo4j_session, current_aws_account_id, groups_policies, aws_update_tag)
+    load_attached_group_policies(neo4j_session, attached_groups_policies, aws_update_tag)
     run_cleanup_job(
         'aws_import_groups_policy_cleanup.json',
         neo4j_session,
@@ -606,12 +848,14 @@ def sync_role_policies(neo4j_session, boto3_session, current_aws_account_id, aws
     roles_policies = {}
     attached_roles_policies = {}
     for role_name in roles:
+        logger.debug("Syncing '%s' role policy...", role_name)
         roles_policies[role_name] = {}
         role_policies = get_role_policies(boto3_session, role_name)
         for policy_name in role_policies['PolicyNames']:
             roles_policies[role_name][policy_name] = get_role_policy_info(boto3_session, role_name, policy_name)
         attached_roles_policies[role_name] = list(set([p['PolicyArn'] for p in role_policies['AttachedPolicies']]))
     load_role_policies(neo4j_session, roles_policies, aws_update_tag)
+    load_role_inline_policies(neo4j_session, current_aws_account_id, roles_policies, aws_update_tag)
     load_attached_role_policies(neo4j_session, attached_roles_policies, aws_update_tag)
     run_cleanup_job(
         'aws_import_roles_policy_cleanup.json',
@@ -635,7 +879,7 @@ def sync_user_access_keys(neo4j_session, boto3_session, current_aws_account_id, 
 
 
 def sync_instance_profiles(neo4j_session, boto3_session, current_aws_account_id, aws_update_tag, common_job_parameters):
-    logger.debug("SYncing IAM instance profiles for account '%s'.", current_aws_account_id)
+    logger.debug("Syncing IAM instance profiles for account '%s'.", current_aws_account_id)
     profiles = get_instance_profile_list_data(boto3_session)
     load_instance_profiles(neo4j_session, profiles, aws_update_tag)
     run_cleanup_job(
@@ -651,6 +895,8 @@ def sync(neo4j_session, boto3_session, account_id, update_tag, common_job_parame
     sync_policies(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
     sync_roles(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
     sync_group_memberships(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
+    sync_group_policies(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
+    sync_user_policies(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
     sync_group_policies(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
     sync_role_policies(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)
     sync_user_access_keys(neo4j_session, boto3_session, account_id, update_tag, common_job_parameters)

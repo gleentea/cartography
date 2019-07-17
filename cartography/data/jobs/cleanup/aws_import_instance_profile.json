@@ -4,5 +4,5 @@
     "iterative": true,
     "iterationsize": 100
   }],
-  "name": "cleanup AWSInstanceProfile AWS_ATTACHED_ROL"
+  "name": "cleanup AWSInstanceProfile AWS_ATTACHED_ROLE"
 }

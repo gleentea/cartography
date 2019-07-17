@@ -108,6 +108,12 @@ def load_ec2_instances(session, data, region, current_aws_account_id, aws_update
     MERGE (aa)-[r:RESOURCE]->(instance)
     ON CREATE SET r.firstseen = timestamp()
     SET r.lastupdated = {aws_update_tag}
+    WITH instance
+    MATCH (profile:AWSInstanceProfile{arn: instance.iaminstanceprofile})
+    WITH instance, profile
+    MERGE (profile)-[r:AWS_ATTACHED_INSTANCE_PROFILE]->(instance)
+    ON CREATE SET r.firstseen = timestamp()
+    SET r.lastupdated = {aws_update_tag}
     """
 
     ingest_security_groups = """
